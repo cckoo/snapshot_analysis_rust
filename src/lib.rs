@@ -4,15 +4,6 @@ use rusqlite::{params, types::ValueRef, Connection};
 use serde_json::{Value};
 use std::{collections::HashMap, format, fs, path::Path};
 
-struct Node {
-    name: String,
-    node_type: String,
-    self_size: u64,
-    distance: u32,
-    retain_size: u64,
-    next: Vec<u64>,
-}
-
 pub fn assoc_db_name(heap_file: &str) -> String {
   let path = Path::new(heap_file);
   format!("{}.db3", path.file_stem().unwrap().to_str().unwrap())
@@ -145,7 +136,7 @@ pub fn insert_nodes(heap_json: &Value, conn: &mut Connection, distance_info: &Ha
 }
 
 pub fn insert_edges(heap_json: &Value, conn: &mut Connection) -> HashMap<u64, Vec<u64>> {
-  let mut tree: HashMap<u64, Node> = HashMap::new();
+  let mut tree: HashMap<u64, Vec<u64>> = HashMap::new();
   let meta = &heap_json["snapshot"]["meta"];
   let node_fields = meta["node_fields"].as_array().unwrap();
   let node_fields_len = node_fields.len();
@@ -176,9 +167,8 @@ pub fn insert_edges(heap_json: &Value, conn: &mut Connection) -> HashMap<u64, Ve
 
   while node_i < node_field_values_len {
     let node_id = node_field_values[node_i + node_id_ofst].as_u64().unwrap();
-    let node_name = strings[node_field_values[node_i + node_name_ofst].as_u64().unwrap() as usize].as_str().unwrap();
-    let node_type = strings[node_field_values[node_i + node_type_ofst].as_u64().unwrap() as usize].as_str().unwrap();
-    let node_self_size = node_field_values[node_i + node_type_ofst].as_u64().unwrap()
+    let node_name = &strings[node_field_values[node_i + node_name_ofst].as_u64().unwrap() as usize].as_str().unwrap();
+    let node_type = &strings[node_field_values[node_i + node_type_ofst].as_u64().unwrap() as usize].as_str().unwrap();
     let edge_count = node_field_values[node_i + edge_count_ofst]
       .as_u64()
       .unwrap();
