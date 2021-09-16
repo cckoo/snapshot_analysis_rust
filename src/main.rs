@@ -1,5 +1,4 @@
-use std::{collections::HashMap};
-
+use chrono::prelude::*;
 use clap::{App, Arg};
 use heapquery::{
   exec_query, init_schema, insert_edges, insert_locations, insert_nodes, open_assoc_db,
@@ -31,17 +30,25 @@ fn main() {
 
   let heap_file = matches.value_of("heap").unwrap();
   if setup_db_if_needed(heap_file) {
+    let mut start_time = Local::now().timestamp_millis();
     let heap_json: Value = read_heap_file(heap_file);
+    println!("Load json and format take: {}ms", Local::now().timestamp_millis()-start_time);
+    start_time = Local::now().timestamp_millis();
     let mut conn = open_assoc_db(heap_file);
     init_schema(&conn);
-    let tree = insert_edges(&heap_json, &mut conn);
-    let mut distance_info: HashMap<u64, u64> = HashMap::new();
+    let mut tree = insert_edges(&heap_json, &mut conn);
+    println!("insert edge take: {}ms", Local::now().timestamp_millis()-start_time);
+    start_time = Local::now().timestamp_millis();
     println!("tree length: {}", tree.len());
-    distance_info.insert(1, 0);
-    calculate_distance(tree[&1].clone(), &tree, 1, &mut distance_info);
-    println!("distance_info length: {}", distance_info.len());
-    insert_nodes(&heap_json, &mut conn, &distance_info);
+    let node_list = vec![1 as u64];
+    calculate_distance(node_list, &mut tree);
+    println!("calculate distance take: {}ms", Local::now().timestamp_millis()-start_time);
+    start_time = Local::now().timestamp_millis();
+    insert_nodes(&mut conn, &tree);
+    println!("insert node take: {}ms", Local::now().timestamp_millis()-start_time);
+    start_time = Local::now().timestamp_millis();
     insert_locations(&heap_json, &mut conn);
+    println!("insert location take: {}ms", Local::now().timestamp_millis()-start_time);
   }
 
   if let Some(query) = matches.value_of("query") {

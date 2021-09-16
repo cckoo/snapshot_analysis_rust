@@ -1,8 +1,18 @@
 use core::fmt;
 // use pbr::ProgressBar;
-use rusqlite::{params, types::ValueRef, Connection};
+use rusqlite::{Connection, params, types::{ValueRef}};
 use serde_json::{Value};
-use std::{collections::HashMap, format, fs, path::Path};
+use std::{collections::HashMap, format, fs, path::Path, vec};
+
+pub struct Node {
+    pub name: String,
+    pub node_type: String,
+    pub self_size: u64,
+    pub distance: u32,
+    pub edge_count: u64,
+    pub retain_size: u64,
+    pub next: Vec<u64>,
+}
 
 pub fn assoc_db_name(heap_file: &str) -> String {
   let path = Path::new(heap_file);
@@ -37,7 +47,8 @@ pub fn init_schema(conn: &Connection) {
       type VARCHAR(50),
       self_size INTEGER,
       children_count INTEGER,
-      distance INTEGER
+      distance INTEGER,
+      retain_size INTEGER
     );
     
     CREATE TABLE IF NOT EXISTS edge (
@@ -58,55 +69,13 @@ pub fn init_schema(conn: &Connection) {
     .expect("unable to init schema");
 }
 
-pub fn insert_nodes(heap_json: &Value, conn: &mut Connection, distance_info: &HashMap<u64, u64>) {
-  let meta = &heap_json["snapshot"]["meta"];
-
-  let node_fields = meta["node_fields"].as_array().unwrap();
-  let node_field_types = meta["node_types"].as_array().unwrap();
-
-  let strings = heap_json["strings"].as_array().unwrap();
-  print!("strings length: {} \n", strings.len());
-
-  let node_field_values = heap_json["nodes"].as_array().unwrap();
-  let node_field_values_len = node_field_values.len();
-  print!("node_field_values length: {} \n", node_field_values_len);
-  let mut i = 0;
+pub fn insert_nodes(conn: &mut Connection, tree: &HashMap<u64, Node>) {
+  
   // let mut pb = ProgressBar::new(node_field_values_len as u64);
   // println!("start insert nodes");
   // pb.format("╢▌▌░╟");
   let tx = conn.transaction().unwrap();
-
-  while i < node_field_values_len {
-    let mut node = HashMap::new();
-
-    node_fields.into_iter().enumerate().for_each(|item| {
-      let key = item.1.as_str().unwrap();
-      let value_type = &node_field_types[item.0];
-      let maybe_value = &node_field_values[i];
-
-      let value = if value_type.is_array() {
-        let enum_values = value_type.as_array().unwrap();
-        &enum_values[maybe_value.as_u64().unwrap() as usize]
-      } else if value_type.as_str().unwrap() == "string" {
-        if maybe_value.as_u64().unwrap() as usize >= strings.len() {
-          // print!("key is :{}\n", key);
-          // print!("value_type is :{}\n", value_type);
-          // print!("maybe value is: {}\n", maybe_value);
-          maybe_value
-        } else {
-          &strings[maybe_value.as_u64().unwrap() as usize]
-        }
-      } else if value_type.as_str().unwrap() == "number" {
-        maybe_value
-      } else {
-        unreachable!(format!("unsupported type: {}", value_type));
-      };
-
-      node.insert(key, value);
-      i += 1;
-      // pb.inc();
-    });
-    let current_distance = distance_info.get(&node["id"].as_u64().unwrap()).unwrap_or(&0);
+  for (node_id, node) in tree {
     // let distance = distance_info.get(&node["id"].as_u64().unwrap());
     // let mut current_distance = 0 as u64;
     // match distance {
@@ -116,16 +85,17 @@ pub fn insert_nodes(heap_json: &Value, conn: &mut Connection, distance_info: &Ha
 
     tx.execute(
       "
-    INSERT INTO node (id, name, type, self_size, children_count, distance)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+    INSERT INTO node (id, name, type, self_size, children_count, distance, retain_size)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
     ",
       params![
-        node["id"].as_u64().unwrap() as u32,
-        node["name"].as_str().unwrap(),
-        node["type"].as_str().unwrap(),
-        node["self_size"].as_u64().unwrap() as u32,
-        node["edge_count"].as_u64().unwrap() as u32,
-        *current_distance as u32
+        *node_id as u32,
+        node.name,
+        node.node_type,
+        node.self_size as u32,
+        node.edge_count as u32,
+        node.distance,
+        node.retain_size as u32,
       ],
     )
     .expect("failed to insert node");
@@ -135,10 +105,11 @@ pub fn insert_nodes(heap_json: &Value, conn: &mut Connection, distance_info: &Ha
   // pb.finish_println("done");
 }
 
-pub fn insert_edges(heap_json: &Value, conn: &mut Connection) -> HashMap<u64, Vec<u64>> {
-  let mut tree: HashMap<u64, Vec<u64>> = HashMap::new();
+pub fn insert_edges(heap_json: &Value, conn: &mut Connection) -> HashMap<u64, Node> {
+  let mut tree: HashMap<u64, Node> = HashMap::new();
   let meta = &heap_json["snapshot"]["meta"];
   let node_fields = meta["node_fields"].as_array().unwrap();
+  let node_field_types = meta["node_types"][0].as_array().unwrap();
   let node_fields_len = node_fields.len();
   let strings = heap_json["strings"].as_array().unwrap();
 
@@ -158,6 +129,7 @@ pub fn insert_edges(heap_json: &Value, conn: &mut Connection) -> HashMap<u64, Ve
   let node_type_ofst = 0;
   let node_name_ofst = 1;
   let node_id_ofst = 2;
+  let node_self_size_ofst = 3;
   let edge_count_ofst = 4;
 
   let mut node_i = 0;
@@ -167,8 +139,10 @@ pub fn insert_edges(heap_json: &Value, conn: &mut Connection) -> HashMap<u64, Ve
 
   while node_i < node_field_values_len {
     let node_id = node_field_values[node_i + node_id_ofst].as_u64().unwrap();
-    let node_name = &strings[node_field_values[node_i + node_name_ofst].as_u64().unwrap() as usize].as_str().unwrap();
-    let node_type = &strings[node_field_values[node_i + node_type_ofst].as_u64().unwrap() as usize].as_str().unwrap();
+    let node_name = strings[node_field_values[node_i + node_name_ofst].as_u64().unwrap() as usize].as_str().unwrap();
+    let node_type = node_field_types[node_field_values[node_i + node_type_ofst].as_u64().unwrap() as usize].as_str().unwrap();
+    // println!("{}", node_type);
+    let node_self_size = node_field_values[node_i + node_self_size_ofst].as_u64().unwrap();
     let edge_count = node_field_values[node_i + edge_count_ofst]
       .as_u64()
       .unwrap();
@@ -231,8 +205,17 @@ pub fn insert_edges(heap_json: &Value, conn: &mut Connection) -> HashMap<u64, Ve
       )
       .expect("failed to insert node");
     }
- 
-    tree.insert(node_id, leaf);
+    let node = Node {
+      name: node_name.to_string(),
+      node_type: node_type.to_string(),
+      self_size: node_self_size,
+      distance: 0 as u32,
+      edge_count: edge_count,
+      retain_size: node_self_size,
+      next: leaf,
+    };
+  
+    tree.insert(node_id, node);
     // pb.add(node_fields_len as u64);
     node_i += node_fields_len;
   }
@@ -305,23 +288,33 @@ pub fn insert_locations(heap_json: &Value, conn: &mut Connection) {
   // pb.finish_println("done");
 }
 
-pub fn calculate_distance(next_node_id_list: Vec<u64>,tree: &HashMap<u64, Vec<u64>>, current_distance: u64, distance_info: &mut HashMap<u64, u64>) {
-  let mut new_leaf = vec![];
-  for next_node_id in next_node_id_list {
-    let res = distance_info.get(&next_node_id);
-    match res {
-      Some(_) => {},
-      None => {
-        distance_info.insert(next_node_id, current_distance);
-        let leaves = &tree[&next_node_id];
-        for leaf in leaves {
-          new_leaf.push(*leaf);
-        }
-      }
+pub fn calculate_distance(current_level_node: Vec<u64> ,tree: &mut HashMap<u64, Node>) {
+  let mut new_leaves = vec![];
+  for node_id in current_level_node {
+    let distance: u32;
+    let retain_size : u64;
+    let child_id_list: Vec<u64>;
+    {
+      let node = tree.get(&node_id).unwrap().clone();
+      distance = node.distance;
+      retain_size = node.retain_size;
+      child_id_list = node.next.clone();
+    }
+    for child_id in child_id_list {
+      node_calculate(child_id, distance, retain_size, tree, &mut new_leaves);
     }
   }
-  if new_leaf.len() > 0 {
-    calculate_distance(new_leaf, tree, current_distance + 1, distance_info) 
+  if new_leaves.len() > 0 {
+    calculate_distance(new_leaves, tree) 
+  }
+}
+
+pub fn node_calculate(node_id: u64, distance: u32, retain_size: u64, tree: &mut HashMap<u64, Node>, new_leaves: &mut Vec<u64>) {
+  let child_node = tree.get_mut(&node_id).unwrap();
+  if child_node.distance == 0 {
+    child_node.distance = distance + 1;
+    child_node.retain_size = retain_size + child_node.self_size;
+    new_leaves.push(node_id);
   }
 }
 
